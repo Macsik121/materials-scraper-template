@@ -111,6 +111,8 @@ Stop-Process -Name chrome, browser -Force -ErrorAction SilentlyContinue
 * **Защита от WAF (Rate Limiting & Jitter):** между логическими переходами встроена случайная задержка `time.sleep(random.uniform(delay_min, delay_max))` (по умолчанию `1.0–3.5` сек, настраивается через CLI).
 * **Умное ожидание всплывающих окон (Popup Await):** при перехвате `context.on("page")` ядро не закрывает вкладку мгновенно, а ждёт появления целевого URL / старта загрузки или таймаута (по умолчанию `5.0` сек), после чего закрывает popup и сбрасывает рабочую вкладку на `about:blank`.
 * **Мгновенная валидация magic bytes:** файл проверяется **до** переноса из `_tmp_downloads`. Если внутри обнаружен HTML (`<!doctype`, `<html`), размер `0 B` или битый заголовок — временный файл удаляется, а в `state.json` пишется `FAILED`.
+* **Отложенное разрешение Signed URLs (Lazy URL Resolution):** для LMS с краткоживущими подписанными ссылками (S3/CloudFront/Kinescope с TTL 5–15 минут) в `manifest.json` хранится стабильный `lesson_url` / `item_ref`, а прямой URL файла запрашивается через адаптер непосредственно перед загрузкой элемента. При `403` с истёкшей подписью (`Expires`/`X-Amz-Expires`) выполняется 1 переразрешение URL до срабатывания Session Circuit Breaker.
+* **Cross-Origin Fallback без `Content-Disposition: attachment`:** Chromium игнорирует атрибут `<a download>` для кросс-доменных URL без `Content-Disposition: attachment` (открывая PDF/видео во вкладке вместо скачивания). При таком ответе загрузчик переключается на резервный канал: `fetch(url, { credentials: "include" })` → `Blob` → `<a download>` внутри контекста страницы либо `context.request.get(url)` с куками и `Referer` активной сессии.
 
 ### 4.2. Матрица обработчиков контента (`core/handlers/`)
 
@@ -161,10 +163,10 @@ Stop-Process -Name chrome, browser -Force -ErrorAction SilentlyContinue
 | Проблема | Первопричина | Инвариант в спецификации |
 | :--- | :--- | :--- |
 | Обрыв `requests` с `SSL: UNEXPECTED_EOF_WHILE_READING` | Несовместимость OpenSSL 3.x со старыми серверами/прокси | Нативная загрузка через CDP браузера (`core/downloader.py`) |
-| Ложный `OK -> 0.00 MB` и битые `.webm` | `redirect.asp?url=...` (в `cp1251`) открывал popup; fallback скачал HTML редиректа как `.webm`[cite: 1] | Popup Await + декодирование `utf-8`/`cp1251` + проверка magic bytes до переноса файла |
-| `.webm` не открывается в плеере Windows | Контейнер WebM (VP8/VP9 + Opus) не поддерживается из коробки[cite: 1] | Отдельный `convert_to_mp4.py` с `yuv420p` и чётными размерами кадра |
-| Свёрнутые модули и фреймы с одним URL | Список находился во фрейме `#elements`, часть модулей скрыта (`display: none`), тесты смешаны с книгами[cite: 3] | Поиск по `page.frames`, чтение `textContent`, фильтрация по семантическим атрибутам |
-| Кириллица и ошибки PowerShell 5.1 | `.ps1` без BOM читался как Windows-1251[cite: 4] | Хранение `.ps1` строго в **UTF-8 with BOM** |
+| Ложный `OK -> 0.00 MB` и битые `.webm` | `redirect.asp?url=...` (в `cp1251`) открывал popup; fallback скачал HTML редиректа как `.webm` | Popup Await + декодирование `utf-8`/`cp1251` + проверка magic bytes до переноса файла |
+| `.webm` не открывается в плеере Windows | Контейнер WebM (VP8/VP9 + Opus) не поддерживается из коробки | Отдельный `convert_to_mp4.py` с `yuv420p` и чётными размерами кадра |
+| Свёрнутые модули и фреймы с одним URL | Список находился во фрейме `#elements`, часть модулей скрыта (`display: none`), тесты смешаны с книгами | Поиск по `page.frames`, чтение `textContent`, фильтрация по семантическим атрибутам |
+| Кириллица и ошибки PowerShell 5.1 | `.ps1` без BOM читался как Windows-1251 | Хранение `.ps1` строго в **UTF-8 with BOM** |
 | Не запускался Яндекс Браузер / не открывался порт `9222` | Кириллица в `--user-data-dir` и зависший фоновый процесс Chrome на порту `9222` | ASCII-путь профиля, `--remote-debugging-address=127.0.0.1`, префлайт `/json/version` + Runbook освобождения порта |
 
 ---

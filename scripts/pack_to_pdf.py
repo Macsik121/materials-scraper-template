@@ -48,7 +48,7 @@ def flatten_to_rgb(img: Image.Image) -> Image.Image:
 def compute_row_darkness(img_rgb: Image.Image, dark_threshold: int = 242) -> list[int]:
     """
     Для каждой строки пикселей считает число «небелых» пикселей
-    на уменьшенной по ширине копии (быстро без NumPy).
+    на уменьшенной по ширине копии через LUT Pillow + быстрый sum(bytes) без NumPy.
     """
     w, h = img_rgb.size
     sample_w = min(w, 420)
@@ -56,12 +56,9 @@ def compute_row_darkness(img_rgb: Image.Image, dark_threshold: int = 242) -> lis
     if sample_w < w:
         gray = gray.resize((sample_w, h), Image.Resampling.BILINEAR)
 
-    raw = gray.tobytes()
-    scores: list[int] = []
-    for y in range(h):
-        row = raw[y * sample_w : (y + 1) * sample_w]
-        scores.append(sum(1 for px in row if px < dark_threshold))
-    return scores
+    lut = [1 if px < dark_threshold else 0 for px in range(256)]
+    raw = gray.point(lut).tobytes()
+    return [sum(raw[y * sample_w : (y + 1) * sample_w]) for y in range(h)]
 
 
 def find_smart_cut_y(
@@ -165,6 +162,14 @@ def validate_pdf(path: Path) -> None:
         raise RuntimeError("Сгенерированный PDF не прошёл проверку сигнатуры (%PDF- / %%EOF)")
 
 
+def _chunk_sort_key(path: Path) -> tuple[int, int, str]:
+    """Числовая сортировка серий кадров: visual_report_01.._99.._100."""
+    m = SERIES_RE.match(path.stem)
+    if m:
+        return (1, int(m.group("idx")), path.name)
+    return (0, 0, path.name)
+
+
 def discover_report_groups(root: Path, name_prefix: str) -> list[tuple[Path, list[Path]]]:
     """
     Группирует PNG-отчёты:
@@ -186,7 +191,7 @@ def discover_report_groups(root: Path, name_prefix: str) -> list[tuple[Path, lis
 
     result: list[tuple[Path, list[Path]]] = []
     for (folder, base), files in sorted(grouped.items()):
-        result.append((folder / f"{base}.pdf", sorted(files)))
+        result.append((folder / f"{base}.pdf", sorted(files, key=_chunk_sort_key)))
     return result
 
 

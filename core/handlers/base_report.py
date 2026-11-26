@@ -5,19 +5,26 @@ import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
-from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Frame, Page
+if TYPE_CHECKING:
+    from playwright.sync_api import Frame, Page
+
+try:
+    from playwright.sync_api import Error as PlaywrightError
+except ImportError:  # pragma: no cover - оффлайн-режим без установленного Playwright
+    PlaywrightError = Exception  # type: ignore[misc,assignment]
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PRINT_STYLE_MARKER = "data-scraper-print"
 DEFAULT_MAX_FULLPAGE_HEIGHT_PX = 15000
 
 DEFAULT_HIDE_SELECTORS: tuple[str, ...] = (
-    "header",
-    "nav",
-    "footer",
+    "body > header",
+    "body > nav",
+    "body > footer",
+    ".site-header",
+    ".site-footer",
     ".sticky",
     ".fixed-top",
     ".fixed-bottom",
@@ -34,19 +41,32 @@ BASE_PRINT_CSS = """
 html, body, #root, #app, main, article, .content-container, .workingplace {
     background-color: #ffffff !important;
     background-image: none !important;
-    color: #000000 !important;
+    color: #111111 !important;
     overflow: visible !important;
     height: auto !important;
     min-height: 0 !important;
     max-height: none !important;
 }
 
-pre, code, .scrollable-box, .code-block, [class*="scroll"] {
+/* Гарантируем читаемость текста на тёмных темах LMS после перевода фона в белый */
+h1, h2, h3, h4, h5, h6, p, span, li, td, th, label, blockquote, dt, dd {
+    color: #111111 !important;
+}
+
+.scrollable-box, [class*="scroll"] {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+}
+
+pre, code, .code-block {
     overflow: visible !important;
     height: auto !important;
     max-height: none !important;
     white-space: pre-wrap !important;
     word-break: break-word !important;
+    background-color: #f8fafc !important;
+    color: #0f172a !important;
 }
 
 /* Контраст для формул MathML / LaTeX / MathJax / KaTeX в тёмной теме */
@@ -183,22 +203,53 @@ def _capture_chunked_page(
     base_name: str,
     total_height: int,
     viewport_height: int,
+    viewport_width: int,
 ) -> list[Path]:
-    """Снимает сверхдлинную страницу (>15 000 px) поэкранными кадрами без обрезки GPU."""
+    """
+    Снимает сверхдлинную страницу (>15 000 px) поэкранными кадрами без обрезки GPU
+    и без дублирования хвоста на последнем экране (через clip при упоре скролла).
+    """
     saved: list[Path] = []
     step = max(viewport_height - 40, 200)
+    est_chunks = (total_height + step - 1) // step
+    pad_width = 3 if est_chunks >= 100 else 2
     y = 0
     idx = 1
 
     try:
         while y < total_height:
-            page.evaluate("(pos) => window.scrollTo(0, pos)", y)
+            actual_y = int(
+                page.evaluate(
+                    """(pos) => {
+                        window.scrollTo(0, pos);
+                        return Math.round(window.scrollY || document.documentElement.scrollTop || 0);
+                    }""",
+                    y,
+                )
+            )
             page.wait_for_timeout(120)
 
-            out_path = output_dir / f"{base_name}_{idx:02d}.png"
+            out_path = output_dir / f"{base_name}_{idx:0{pad_width}d}.png"
             tmp_path = out_path.with_suffix(".tmp.png")
             try:
-                page.screenshot(path=str(tmp_path), full_page=False, animations="disabled")
+                screenshot_kwargs: dict[str, Any] = {
+                    "path": str(tmp_path),
+                    "full_page": False,
+                    "animations": "disabled",
+                }
+                # Если браузер упёрся в низ документа и actual_y < y, вырезаем только новую часть снизу
+                if actual_y < y:
+                    clip_y = max(0, y - actual_y)
+                    clip_h = max(1, min(viewport_height - clip_y, total_height - y))
+                    if clip_y < viewport_height:
+                        screenshot_kwargs["clip"] = {
+                            "x": 0,
+                            "y": clip_y,
+                            "width": max(1, viewport_width),
+                            "height": clip_h,
+                        }
+
+                page.screenshot(**screenshot_kwargs)
                 validate_png(tmp_path)
                 os.replace(tmp_path, out_path)
                 saved.append(out_path)
@@ -238,15 +289,34 @@ def capture_visual_report(
                 document.body ? document.body.scrollHeight : 0,
                 document.documentElement ? document.documentElement.scrollHeight : 0
             ),
-            viewportHeight: window.innerHeight || 900
+            viewportHeight: window.innerHeight || 900,
+            viewportWidth: window.innerWidth || 1280
         })"""
     )
     scroll_height = int(metrics["scrollHeight"] or 0)
     viewport_height = int(metrics["viewportHeight"] or 900)
+    viewport_width = int(metrics["viewportWidth"] or 1280)
 
-    # Сверхдлинная страница: обходим лимит высоты Skia (~16 384 px)
-    if not _is_nested_frame(target) and scroll_height > max_height_px:
-        return _capture_chunked_page(page, output_dir, base_name, scroll_height, viewport_height)
+    # Сверхдлинная страница (или развёрнутый сверхдлинный iframe): обходим лимит Skia (~16 384 px)
+    if scroll_height > max_height_px:
+        page_metrics = page.evaluate(
+            """() => ({
+                scrollHeight: Math.max(
+                    document.body ? document.body.scrollHeight : 0,
+                    document.documentElement ? document.documentElement.scrollHeight : 0
+                ),
+                viewportHeight: window.innerHeight || 900,
+                viewportWidth: window.innerWidth || 1280
+            })"""
+        )
+        return _capture_chunked_page(
+            page=page,
+            output_dir=output_dir,
+            base_name=base_name,
+            total_height=max(scroll_height, int(page_metrics["scrollHeight"] or scroll_height)),
+            viewport_height=int(page_metrics["viewportHeight"] or viewport_height),
+            viewport_width=int(page_metrics["viewportWidth"] or viewport_width),
+        )
 
     out_path = output_dir / f"{base_name}.png"
     tmp_path = out_path.with_suffix(".tmp.png")

@@ -1,0 +1,28 @@
+# Course Scraper — дампы, выгруженные материалы и состояние (НЕ коммитить!)
+web-page-reverse-engineering/*
+!web-page-reverse-engineering/.gitkeep
+*.har
+downloaded_course/
+sorted_course/
+archives/
+state.json
+manifest.json
+_tmp_downloads/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.tmp
+*.tmp.png
+*.tmp.pdf
+*.part
+*.crdownload
+
+# Node / Workbench
+node_modules/
+dist/
+.playwright-cli/
+.env
+.env.local
